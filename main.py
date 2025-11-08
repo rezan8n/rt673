@@ -13,8 +13,11 @@ def home():
 @app.route('/', methods=['POST'])
 def webhook():
     data = request.get_json()
+    if not data or 'message' not in data:
+        return 'No message received', 400
+
     chat_id = data['message']['chat']['id']
-    text = data['message']['text']
+    text = data['message'].get('text', '')
 
     reply = ask_ai(text)
     send_message(chat_id, reply)
@@ -31,9 +34,12 @@ def ask_ai(message):
             {"parts": [{"text": message}]}
         ]
     }
-    res = requests.post(url, json=payload)
-    data = res.json()
     try:
+        res = requests.post(url, json=payload)
+        data = res.json()
         return data['candidates'][0]['content']['parts'][0]['text']
-    except:
-        return "❌ خطا در دریافت پاسخ از هوش مصنوعی."
+    except Exception as e:
+        return f"❌ خطا در دریافت پاسخ از Gemini: {e}"
+
+if __name__ == '__main__':
+    app.run(debug=True)
