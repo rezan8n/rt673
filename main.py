@@ -7,7 +7,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AI_API_KEY = os.getenv("AI_API_KEY")
 
 @app.route('/', methods=['GET'])
-def home():
+def index():
     return '✅ Bot is running!'
 
 @app.route('/', methods=['POST'])
@@ -40,6 +40,3 @@ def ask_ai(message):
         return data['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"❌ خطا در دریافت پاسخ از Gemini: {e}"
-
-if __name__ == '__main__':
-    app.run(debug=True)
