@@ -13,11 +13,18 @@ def index():
 @app.route('/', methods=['POST'])
 def webhook():
     data = request.get_json()
-    if not data or 'message' not in data:
-        return 'No message received', 400
+    print("📩 پیام دریافتی از تلگرام:", data)
+
+    if not data or 'message' not in data or 'chat' not in data['message']:
+        print("⚠️ ساختار پیام نامعتبره")
+        return 'Invalid message format', 400
 
     chat_id = data['message']['chat']['id']
     text = data['message'].get('text', '')
+
+    if not text:
+        print("⚠️ پیام متنی دریافت نشد")
+        return 'No text message', 200
 
     reply = ask_ai(text)
     send_message(chat_id, reply)
@@ -25,7 +32,8 @@ def webhook():
 
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": text})
+    res = requests.post(url, json={"chat_id": chat_id, "text": text})
+    print("📤 پاسخ ارسال‌شده به تلگرام:", res.status_code, res.text)
 
 def ask_ai(message):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={AI_API_KEY}"
@@ -37,6 +45,7 @@ def ask_ai(message):
     try:
         res = requests.post(url, json=payload)
         data = res.json()
-        return data['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        return f"❌ خطا در دریافت پاسخ از Gemini: {e}"
+        print("🔍 پاسخ خام Gemini:", data)
+
+        if 'candidates' in data:
+            return data['candidates']
