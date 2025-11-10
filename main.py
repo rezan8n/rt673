@@ -55,3 +55,4 @@ def ask_ai(message):
             return f"❌ پاسخ نامعتبر از Gemini: {data}"
     except Exception as e:
         return f"❌ خطای ارتباط با Gemini: {e}"
+
