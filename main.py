@@ -48,4 +48,10 @@ def ask_ai(message):
         print("🔍 پاسخ خام Gemini:", data)
 
         if 'candidates' in data:
-            return data['candidates']
+            return data['candidates'][0]['content']['parts'][0]['text']
+        elif 'error' in data:
+            return f"❌ خطا از سمت Gemini: {data['error'].get('message', 'خطای ناشناخته')}"
+        else:
+            return f"❌ پاسخ نامعتبر از Gemini: {data}"
+    except Exception as e:
+        return f"❌ خطای ارتباط با Gemini: {e}"
