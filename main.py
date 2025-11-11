@@ -3,16 +3,13 @@ import requests, os
 
 app = Flask(__name__)
 
-# دریافت توکن‌ها از متغیرهای محیطی
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 AI_API_KEY = os.getenv("AI_API_KEY")
 
-# مسیر تست برای بررسی سلامت سرویس
 @app.route('/', methods=['GET'])
 def index():
     return '✅ Bot is running!'
 
-# مسیر اصلی برای دریافت پیام از تلگرام
 @app.route('/', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -33,15 +30,13 @@ def webhook():
     send_message(chat_id, reply)
     return 'ok'
 
-# ارسال پاسخ به تلگرام
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     res = requests.post(url, json={"chat_id": chat_id, "text": text})
     print("📤 پاسخ ارسال‌شده به تلگرام:", res.status_code, res.text)
 
-# دریافت پاسخ از Gemini
 def ask_ai(message):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={AI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro-latest:generateContent?key={AI_API_KEY}"
     payload = {
         "contents": [
             {"parts": [{"text": message}]}
