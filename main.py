@@ -16,7 +16,6 @@ if not TELEGRAM_TOKEN or not AI_API_KEY:
     raise ValueError("توکن تلگرام یا کلید API هوش مصنوعی تنظیم نشده‌اند!")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-# توجه: از درج AI_API_KEY در لاگ یا چاپ URL کامل حاوی کلید خودداری کنید
 AI_BASE = "https://generativelanguage.googleapis.com/v1"
 
 session = requests.Session()
@@ -97,10 +96,8 @@ def send_message(chat_id, text, parse_mode=None):
 def list_models():
     url = f"{AI_BASE}/models"
     def do_get():
-        # استفاده از key در پارامتر query چون API key است
         res = session.get(url, params={"key": AI_API_KEY}, timeout=10)
         if res.status_code != 200:
-            # لاگ کردن متن خطا بدون چاپ کلید
             logging.error("ListModels returned %s: %s", res.status_code, res.text)
             res.raise_for_status()
         return res.json()
@@ -108,16 +105,14 @@ def list_models():
 
 def try_generate_with_url(url, payload):
     def do_post():
-        res = session.post(url, json=payload, timeout=15)
+        res = session.post(url, params={"key": AI_API_KEY}, json=payload, timeout=15)
         if res.status_code != 200:
-            # لاگ کردن غیرحساس (بدون کلید در URL)
             logging.error("AI API returned %s: %s", res.status_code, res.text)
             res.raise_for_status()
         return res.json()
     return retry_request(do_post, retries=1, backoff=1)
 
 def extract_text_from_response(data):
-    # تلاش مشابه قبل برای استخراج متن از پاسخ‌های مختلف
     reply_parts = []
     outputs = data.get("outputs")
     if outputs and isinstance(outputs, list):
@@ -152,7 +147,6 @@ def extract_text_from_response(data):
                 elif isinstance(c, str):
                     reply_parts.append(c)
     if not reply_parts:
-        # آخرین راه: استخراج رشته‌ها و انتخاب طولانی‌ترین
         def extract_strings(obj):
             found = []
             if isinstance(obj, str):
@@ -176,9 +170,7 @@ def extract_text_from_response(data):
     return reply
 
 def ask_ai(message):
-    # ابتدا لیست مدل‌ها را بخوانیم تا از مدل‌های موجود/روش‌های پشتیبانی‌شده مطلع شویم
     models_info = list_models()
-    # برای عیب‌یابی، لاگ نام مدل‌ها (بدون کلید) — این اطلاعات معمولاً حساس نیست
     model_names = []
     if isinstance(models_info, dict):
         items = models_info.get("models") or models_info.get("model") or []
@@ -187,28 +179,28 @@ def ask_ai(message):
                 name = m.get("name") if isinstance(m, dict) else None
                 if name:
                     model_names.append(name)
-    logging.info("Available models (sample): %s", model_names[:10])
+    logging.info("Available models (sample): %s", model_names[:20])
 
-    # انتخاب مدل: اگر لیست خالی بود، از یک نام عمومی فرضی استفاده نکنیم؛ خطا بدهیم و لاگ مناسب ثبت کنیم
     if not model_names:
         raise RuntimeError("No models found from ListModels")
 
-    # ترجیحاً مدل اول را استفاده می‌کنیم ولی بهتر است مدل‌هایی که نام‌شان شامل 'bison' یا 'gemini' است در اولویت باشند
-    chosen = None
+    # choose model (full name from list, we will strip "models/" when building URL)
+    chosen_full = None
     for name in model_names:
         ln = name.lower()
         if "bison" in ln or "gemini" in ln or "text" in ln:
-            chosen = name
+            chosen_full = name
             break
-    if not chosen:
-        chosen = model_names[0]
+    if not chosen_full:
+        chosen_full = model_names[0]
 
-    logging.info("Selected model: %s", chosen)
+    # If chosen_full is like 'models/gemini-2.5-flash', extract trailing part for URL
+    chosen_for_url = chosen_full.split("/")[-1] if "/" in chosen_full else chosen_full
+    logging.info("Selected model (full): %s ; using for calls: %s", chosen_full, chosen_for_url)
 
-    # تلاش‌های متوالی با متدهای رایج
     errors = []
-    # 1) try generateContent (شکل قبلی payload)
-    url1 = f"{AI_BASE}/models/{chosen}:generateContent"
+    # try generateContent
+    url1 = f"{AI_BASE}/models/{chosen_for_url}:generateContent"
     payload1 = {"contents": [{"parts": [{"text": message}]}]}
     try:
         data = try_generate_with_url(url1, payload1)
@@ -218,10 +210,10 @@ def ask_ai(message):
             return text
     except Exception as e:
         errors.append(("generateContent", str(e)))
-        logging.debug("generateContent failed for %s: %s", chosen, e)
+        logging.debug("generateContent failed for %s: %s", chosen_for_url, e)
 
-    # 2) try generateText (payload common for some versions)
-    url2 = f"{AI_BASE}/models/{chosen}:generateText"
+    # try generateText
+    url2 = f"{AI_BASE}/models/{chosen_for_url}:generateText"
     payload2 = {"prompt": {"text": message}}
     try:
         data = try_generate_with_url(url2, payload2)
@@ -231,10 +223,10 @@ def ask_ai(message):
             return text
     except Exception as e:
         errors.append(("generateText", str(e)))
-        logging.debug("generateText failed for %s: %s", chosen, e)
+        logging.debug("generateText failed for %s: %s", chosen_for_url, e)
 
-    # 3) try generic :generate with a couple payload shapes
-    url3 = f"{AI_BASE}/models/{chosen}:generate"
+    # try generic generate
+    url3 = f"{AI_BASE}/models/{chosen_for_url}:generate"
     payload3 = {"input": message}
     try:
         data = try_generate_with_url(url3, payload3)
@@ -244,9 +236,8 @@ def ask_ai(message):
             return text
     except Exception as e:
         errors.append(("generate", str(e)))
-        logging.debug(":generate failed for %s: %s", chosen, e)
+        logging.debug(":generate failed for %s: %s", chosen_for_url, e)
 
-    # اگر همه شکست خوردند، لاگ کامل خطاها و یک استثنا پرتاب کن
     logging.error("All generation attempts failed. Attempts: %s", errors)
     raise RuntimeError("AI generation failed; see server logs for details")
 
