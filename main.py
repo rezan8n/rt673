@@ -4,6 +4,7 @@ import os
 import logging
 import time
 import traceback
+from typing import Optional
 
 app = Flask(__name__)
 
@@ -19,6 +20,15 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 AI_BASE = "https://generativelanguage.googleapis.com/v1"
 
 session = requests.Session()
+
+# --- simple model cache to avoid calling ListModels on every request ---
+_MODEL_CACHE = {"models": [], "ts": 0}
+_MODEL_CACHE_TTL = 300  # seconds
+
+class RateLimitError(Exception):
+    def __init__(self, message, retry_after: Optional[int] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 def retry_request(func, retries=3, backoff=1):
     for attempt in range(1, retries + 1):
@@ -62,6 +72,9 @@ def webhook():
 
         try:
             reply = ask_ai(text)
+        except RateLimitError as e:
+            logging.warning("Rate-limited: %s (retry_after=%s)", e, e.retry_after)
+            reply = "در حال حاضر محدودیت استفاده سرویس هوش مصنوعی پر شده است. لطفاً چند دقیقه بعد دوباره تلاش کنید."
         except Exception:
             logging.exception("❌ خطا در فراخوانی هوش مصنوعی:")
             reply = "متأسفم، در دریافت پاسخ از سرویس هوش مصنوعی مشکلی پیش آمد. لطفاً بعداً تلاش کنید."
@@ -94,6 +107,11 @@ def send_message(chat_id, text, parse_mode=None):
         logging.exception("❌ خطا در ارسال پیام به تلگرام")
 
 def list_models():
+    # cached
+    now = time.time()
+    if _MODEL_CACHE["models"] and now - _MODEL_CACHE["ts"] < _MODEL_CACHE_TTL:
+        return _MODEL_CACHE["models"]
+
     url = f"{AI_BASE}/models"
     def do_get():
         res = session.get(url, params={"key": AI_API_KEY}, timeout=10)
@@ -101,16 +119,37 @@ def list_models():
             logging.error("ListModels returned %s: %s", res.status_code, res.text)
             res.raise_for_status()
         return res.json()
-    return retry_request(do_get, retries=2, backoff=1)
+    data = retry_request(do_get, retries=2, backoff=1)
+    models = []
+    if isinstance(data, dict):
+        items = data.get("models") or data.get("model") or []
+        if isinstance(items, list):
+            for m in items:
+                name = m.get("name") if isinstance(m, dict) else None
+                if name:
+                    models.append(name)
+    _MODEL_CACHE["models"] = models
+    _MODEL_CACHE["ts"] = time.time()
+    return models
 
 def try_generate_with_url(url, payload):
-    def do_post():
-        res = session.post(url, params={"key": AI_API_KEY}, json=payload, timeout=15)
-        if res.status_code != 200:
-            logging.error("AI API returned %s: %s", res.status_code, res.text)
-            res.raise_for_status()
-        return res.json()
-    return retry_request(do_post, retries=1, backoff=1)
+    """
+    POST to url with key as query param.
+    If 429, raise RateLimitError with retry_after if present.
+    """
+    res = session.post(url, params={"key": AI_API_KEY}, json=payload, timeout=15)
+    if res.status_code == 429:
+        retry_after = None
+        try:
+            retry_after = int(res.headers.get("Retry-After"))
+        except Exception:
+            retry_after = None
+        logging.error("AI API returned 429: %s", res.text)
+        raise RateLimitError("Rate limited by AI API", retry_after=retry_after)
+    if res.status_code != 200:
+        logging.error("AI API returned %s: %s", res.status_code, res.text)
+        res.raise_for_status()
+    return res.json()
 
 def extract_text_from_response(data):
     reply_parts = []
@@ -169,22 +208,20 @@ def extract_text_from_response(data):
         reply = reply[:3996] + "..."
     return reply
 
-def ask_ai(message):
-    models_info = list_models()
-    model_names = []
-    if isinstance(models_info, dict):
-        items = models_info.get("models") or models_info.get("model") or []
-        if isinstance(items, list):
-            for m in items:
-                name = m.get("name") if isinstance(m, dict) else None
-                if name:
-                    model_names.append(name)
-    logging.info("Available models (sample): %s", model_names[:20])
+def ask_ai(message: str) -> str:
+    """
+    Strategy:
+    - Get cached models list
+    - Choose a model (prefer 'gemini' or 'bison' if available)
+    - Try generateContent first (since some gemini endpoints use it), with exponential backoff on 429
+    - If generateContent not supported, try generateText / generate.
+    """
+    model_names = list_models()
+    logging.info("Available models (sample): %s", model_names[:10])
 
     if not model_names:
         raise RuntimeError("No models found from ListModels")
 
-    # choose model (full name from list, we will strip "models/" when building URL)
     chosen_full = None
     for name in model_names:
         ln = name.lower()
@@ -194,25 +231,44 @@ def ask_ai(message):
     if not chosen_full:
         chosen_full = model_names[0]
 
-    # If chosen_full is like 'models/gemini-2.5-flash', extract trailing part for URL
+    # strip "models/" if present
     chosen_for_url = chosen_full.split("/")[-1] if "/" in chosen_full else chosen_full
     logging.info("Selected model (full): %s ; using for calls: %s", chosen_full, chosen_for_url)
 
-    errors = []
-    # try generateContent
+    # reduce token usage where possible: shorten input if too long
+    if len(message) > 2000:
+        message = message[:2000] + "\n\n...[trimmed for quota]"
+
+    # 1) try generateContent with exponential backoff if rate-limited
     url1 = f"{AI_BASE}/models/{chosen_for_url}:generateContent"
     payload1 = {"contents": [{"parts": [{"text": message}]}]}
-    try:
-        data = try_generate_with_url(url1, payload1)
-        text = extract_text_from_response(data)
-        if text:
-            logging.info("🤖 پاسخ تولیدشده از هوش مصنوعی (via generateContent)")
-            return text
-    except Exception as e:
-        errors.append(("generateContent", str(e)))
-        logging.debug("generateContent failed for %s: %s", chosen_for_url, e)
+    backoff_base = 1.5
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        try:
+            data = try_generate_with_url(url1, payload1)
+            text = extract_text_from_response(data)
+            if text:
+                logging.info("🤖 پاسخ تولیدشده از هوش مصنوعی (via generateContent)")
+                return text
+            break  # if no text, move to next method
+        except RateLimitError as e:
+            if e.retry_after:
+                sleep_time = e.retry_after
+            else:
+                sleep_time = int(backoff_base ** attempt)
+            logging.warning("Rate limited on generateContent. sleeping %s seconds (attempt %d/%d)", sleep_time, attempt, max_attempts)
+            if attempt == max_attempts:
+                raise e
+            time.sleep(sleep_time)
+        except requests.HTTPError as e:
+            logging.debug("generateContent HTTPError: %s", e)
+            break
+        except Exception as e:
+            logging.debug("generateContent other error: %s", e)
+            break
 
-    # try generateText
+    # 2) try generateText
     url2 = f"{AI_BASE}/models/{chosen_for_url}:generateText"
     payload2 = {"prompt": {"text": message}}
     try:
@@ -221,11 +277,13 @@ def ask_ai(message):
         if text:
             logging.info("🤖 پاسخ تولیدشده از هوش مصنوعی (via generateText)")
             return text
+    except RateLimitError as e:
+        logging.warning("Rate-limited on generateText: %s", e)
+        raise e
     except Exception as e:
-        errors.append(("generateText", str(e)))
-        logging.debug("generateText failed for %s: %s", chosen_for_url, e)
+        logging.debug("generateText failed: %s", e)
 
-    # try generic generate
+    # 3) try generic generate
     url3 = f"{AI_BASE}/models/{chosen_for_url}:generate"
     payload3 = {"input": message}
     try:
@@ -234,11 +292,13 @@ def ask_ai(message):
         if text:
             logging.info("🤖 پاسخ تولیدشده از هوش مصنوعی (via generate)")
             return text
+    except RateLimitError as e:
+        logging.warning("Rate-limited on generate: %s", e)
+        raise e
     except Exception as e:
-        errors.append(("generate", str(e)))
-        logging.debug(":generate failed for %s: %s", chosen_for_url, e)
+        logging.debug("generate failed: %s", e)
 
-    logging.error("All generation attempts failed. Attempts: %s", errors)
+    logging.error("All generation attempts failed for model %s", chosen_for_url)
     raise RuntimeError("AI generation failed; see server logs for details")
 
 if __name__ == "__main__":
