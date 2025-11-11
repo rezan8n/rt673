@@ -41,7 +41,7 @@ def send_message(chat_id, text):
 
 # دریافت پاسخ از Gemini
 def ask_ai(message):
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro-latest:generateContent?key={AI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={AI_API_KEY}"
     payload = {
         "contents": [
             {"parts": [{"text": message}]}
